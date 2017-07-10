@@ -86,65 +86,6 @@ and parse_string_2 buffer = parse
 
 {
 
-let print_list_of_languages fmt ~variants =
-  Format.fprintf fmt
-    "let%%shared languages = [%a]\n"
-    (Format.pp_print_list
-       ~pp_sep:(fun fmt () -> Format.pp_print_string fmt ";")
-       Format.pp_print_string) variants
-
-let print_type fmt ~variants =
-  Format.fprintf fmt
-    "[%%%%shared type t = %a]\n\
-     [%%%%shared exception Unknown_language of string]\n"
-    (Format.pp_print_list
-       ~pp_sep:(fun fmt () -> Format.pp_print_string fmt "|")
-       Format.pp_print_string) variants
-
-let print_header fmt ~default_language =
-  Format.pp_print_string fmt @@
-  "let%shared default_language = " ^ default_language ^ "\n\
-   let%server _language_ =\n\
-   Eliom_reference.Volatile.eref\n\
-   ~scope:Eliom_common.default_process_scope default_language\n\
-   let%server get_language () = Eliom_reference.Volatile.get _language_\n\
-   let%server set_language language = \n\
-   Eliom_reference.Volatile.set _language_ language\n\
-   \n\
-   let%client _language_ = ref default_language\n\
-   let%client get_language () = !_language_\n\
-   let%client set_language language = _language_ := language\n\
-   \n\
-   let%shared pcdata = Eliom_content.Html.F.pcdata\n\
-"
-
-(** Print the function [string_of_language] returning the string representation of a
-    value o type t. The string representation is simply the value as a string. For
-    example, the string representation of [Us] is ["Us"]
-*)
-let print_string_of_language fmt ~variants ~strings =
-  Format.pp_print_string fmt "let%shared string_of_language = function \n" ;
-  List.iter2 (fun v s -> Format.fprintf fmt "| %s -> %S" v s)
-    variants strings ;
-  Format.pp_print_string fmt "\n"
-
-(** Print the function [language_of_string] returning the value of type t which
-    corresponds to the given string. The exception [Unknown_language] is raised with
-    the given string if the language doesn't exist.
-*)
-let print_language_of_string fmt ~variants ~strings =
-  Format.pp_print_string fmt "let%shared language_of_string = function\n" ;
-  List.iter2 (fun v s -> Format.fprintf fmt "| %S -> %s" s v)
-    variants strings ;
-  Format.pp_print_string fmt "| s -> raise (Unknown_language s)\n"
-
-let print_guess_language_of_string fmt =
-  Format.pp_print_string fmt
-    "let%shared guess_language_of_string s = \n\
-     try language_of_string s \n\
-     with Unknown_language _ -> \n\
-     language_of_string (String.sub s 0 (String.index s '-'))\n"
-
 type arg = M of string | O of string
 
 let print_module_body print_expr =
@@ -168,13 +109,13 @@ let print_module_body print_expr =
     ~pp_sep:(fun fmt () -> Format.pp_print_string fmt "\n")
     (fun fmt (key, tr) ->
        let args = args (List.map snd tr) in
-       Format.fprintf fmt "let %s ?(lang = get_language ()) () =\n\
+       Format.fprintf fmt "let %s ?(lang = L.get ()) () =\n\
                            match lang with\n%a"
          key
          (Format.pp_print_list
             ~pp_sep:(fun fmt () -> Format.pp_print_string fmt "\n")
             (fun fmt (language, tr) ->
-               Format.fprintf fmt "| %s -> (fun %a () -> %a)"
+               Format.fprintf fmt "| L.%s -> (fun %a () -> %a)"
                  language print_args args print_expr tr) ) tr )
 
 let pp_print_list fmt printer =
@@ -183,16 +124,18 @@ let pp_print_list fmt printer =
        ~pp_sep:(fun fmt () -> Format.pp_print_string fmt ";")
        printer)
 
-let print_expr_html fmt key_values =
+let print_expr_eliom_content fmt key_values =
   Format.fprintf fmt "List.flatten " ;
   pp_print_list fmt
     (fun fmt -> function
-       | Str s -> Format.fprintf fmt "[pcdata \"%s\"]" s
+       | Str s -> Format.fprintf fmt "[Eliom_content.Html.F.pcdata \"%s\"]" s
        | Var v -> Format.pp_print_string fmt v
        | Var_typed (v, f) ->
-         Format.fprintf fmt "[pcdata (Printf.sprintf \"%s\" %s)]" f v
+         Format.fprintf fmt
+           "[Eliom_content.Html.F.pcdata (Printf.sprintf \"%s\" %s)]" f v
        | Cond (c, s1, s2) ->
-         Format.fprintf fmt "[pcdata (if %s then \"%s\" else \"%s\")]"
+         Format.fprintf fmt
+           "[Eliom_content.Html.F.pcdata (if %s then \"%s\" else \"%s\")]"
            c s1 s2)
     key_values
 
@@ -209,28 +152,32 @@ let print_expr_string fmt key_values =
            c s1 s2)
     key_values
 
+let print_module output name print_expr key_values =
+  Format.fprintf output
+    "module %s (L : sig type t val get : unit -> t end) =\n" name ;
+  print_module_body print_expr output key_values ;
+  Format.pp_print_string output "end\n"
+
 let input_file = ref "-"
 let output_file = ref "-"
 let languages = ref ""
-let default_language = ref ""
-let external_type = ref false
+let modules = ref ""
 
 let options = Arg.align
     [ ( "--languages", Arg.Set_string languages
-      , " Comma-separated languages (e.g. en,fr-fr, or Foo.Fr,Foo.Us if \
-         using external types). \
+      , " Comma-separated languages corresponding to the variants of the functor's \
+         argument type. Shall not be prefixed by the module name (e.g. Fr,Us). \
          Must be ordered as in source TSV file.")
-    ; ( "--default-language", Arg.Set_string default_language
-      , " Set the default language (default is the first one in --languages).")
     ; ( "--input-file", Arg.Set_string input_file
       , " TSV file containing keys and translations. \
          If option is omited or set to -, read on stdin.")
     ; ( "--ouput-file", Arg.Set_string output_file
       , " File TSV file containing keys and translations. \
          If option is omited or set to -, write on stdout.")
-    ; ( "--external-type", Arg.Set external_type
-      , " Values passed to --languages option come from a predefined type \
-         (do not generate the type nor from/to string functions).")
+    ; ( "--modules", Arg.Set_string modules
+      , " Names and types of modules to generate. Comma-separated list. \
+         E.g. (S:string,H:eliom_content)\
+         Available module types are [string] and [eliom_content].")
     ]
 
 let usage = "usage: ocsigen-i18n-generator [options] [< input] [> output]"
@@ -251,36 +198,24 @@ let _ =
     match !output_file with
     | "-" -> stdout
     | file -> open_out file in
-  let strings = Str.split (Str.regexp ",") !languages in
-  let variants =
-    if not (!external_type) then List.map normalize_type strings
-    else strings in
-  let default_language =
-    match !default_language with
-    | "" -> (List.hd variants)
-    | x ->
-      let x = normalize_type x in
-      assert (List.mem x variants) ;
-      x in
+  let languages = Str.split (Str.regexp ",") !languages in
+  let modules = Str.split (Str.regexp ",") !modules in
   let lexbuf = Lexing.from_channel in_chan in
   (try
-     let key_values = parse_lines variants [] lexbuf in
+     let key_values = parse_lines languages [] lexbuf in
      let output = Format.formatter_of_out_channel out_chan in
-     if not (!external_type) then
-       ( print_type output ~variants
-       ; print_string_of_language output ~variants ~strings
-       ; print_language_of_string output ~variants ~strings
-       ; print_guess_language_of_string output) ;
-     print_list_of_languages output ~variants ;
-     print_header output ~default_language ;
-     Format.pp_print_string output "[%%shared\n" ;
-     Format.fprintf output "module Tr = struct\n" ;
-     print_module_body print_expr_html output key_values ;
-     Format.fprintf output "\nmodule S = struct\n" ;
-     print_module_body print_expr_string output key_values ;
-     Format.fprintf output "\nend\n" ;
-     Format.fprintf output "end\n" ;
-     Format.pp_print_string output "]\n"
+     List.iter
+       (fun x ->
+          let name, print_expr = match Str.split (Str.regexp ":") x with
+            | [ name ; "eliom_content" ] ->
+              (name, print_expr_eliom_content)
+            | [ name ; "string" ] ->
+              (name, print_expr_string)
+
+            | _ -> assert false
+          in
+          print_module output name print_expr key_values)
+       modules
    with Failure msg ->
      failwith (Printf.sprintf "line: %d"
                  lexbuf.Lexing.lex_curr_p.Lexing.pos_lnum) ) ;

@@ -24,7 +24,7 @@ open Longident
 let module_name = ref ""
 
 let mk_ident i =
-  parse (!module_name ^ ".Tr." ^ (String.concat "." (Longident.flatten i.txt)))
+  parse (!module_name ^ "." ^ (String.concat "." (Longident.flatten i.txt)))
 
 let unit loc = { pexp_desc =
                Pexp_construct ( Location.mknoloc (Longident.Lident "()")
